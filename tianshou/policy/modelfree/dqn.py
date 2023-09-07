@@ -6,6 +6,7 @@ import torch
 
 from tianshou.data import Batch, ReplayBuffer, to_numpy, to_torch_as
 from tianshou.policy import BasePolicy
+from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class DQNPolicy(BasePolicy):
@@ -46,6 +47,7 @@ class DQNPolicy(BasePolicy):
         estimation_step: int = 1,
         target_update_freq: int = 0,
         reward_normalization: bool = False,
+        state_tracker = None,
         is_double: bool = True,
         clip_loss_grad: bool = False,
         **kwargs: Any,
@@ -67,10 +69,14 @@ class DQNPolicy(BasePolicy):
         self._rew_norm = reward_normalization
         self._is_double = is_double
         self._clip_loss_grad = clip_loss_grad
+        self.state_tracker = state_tracker
 
     def set_eps(self, eps: float) -> None:
         """Set the eps for epsilon-greedy exploration."""
         self.eps = eps
+    
+    def set_collector(self, train_collector):
+        self.train_collector = train_collector
 
     def train(self, mode: bool = True) -> "DQNPolicy":
         """Set the module in training mode, except for the target network."""
@@ -84,10 +90,10 @@ class DQNPolicy(BasePolicy):
 
     def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
         batch = buffer[indices]  # batch.obs_next: s_{t+n}
-        result = self(batch, input="obs_next")
+        result = self(batch, buffer, indices, input="obs_next")
         if self._target:
             # target_Q = Q_old(s_, argmax(Q_new(s_, *)))
-            target_q = self(batch, model="model_old", input="obs_next").logits
+            target_q = self(batch, buffer, indices, model="model_old", input="obs_next").logits
         else:
             target_q = result.logits
         if self._is_double:
@@ -103,6 +109,7 @@ class DQNPolicy(BasePolicy):
         More details can be found at
         :meth:`~tianshou.policy.BasePolicy.compute_nstep_return`.
         """
+        batch.indices = indices  # update
         batch = self.compute_nstep_return(
             batch, buffer, indices, self._target_q, self._gamma, self._n_step,
             self._rew_norm
@@ -122,6 +129,10 @@ class DQNPolicy(BasePolicy):
     def forward(
         self,
         batch: Batch,
+        buffer: Optional[ReplayBuffer],
+        indices: np.ndarray = None,
+        remove_recommended_ids = False,
+        is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         model: str = "model",
         input: str = "obs",
@@ -157,19 +168,29 @@ class DQNPolicy(BasePolicy):
         model = getattr(self, model)
         obs = batch[input]
         obs_next = obs.obs if hasattr(obs, "obs") else obs
-        logits, hidden = model(obs_next, state=state, info=batch.info)
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=obs_next, is_obs=(input=="obs"), is_train=is_train)
+        logits, hidden = model(obs_emb, state=state, info=batch.info)
         q = self.compute_q_value(logits, getattr(obs, "mask", None))
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q.shape[1]
-        act = to_numpy(q.max(dim=1)[1])
+
+        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
+        logits_masked, indices_masked = removed_recommended_id_from_embedding(q, recommended_ids)
+        act_masked = logits_masked.max(dim=1)[1]
+        act_unsqueezed = act_masked.unsqueeze(-1)
+        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
+
         return Batch(logits=logits, act=act, state=hidden)
 
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
         if self._target and self._iter % self._freq == 0:
             self.sync_weight()
-        self.optim.zero_grad()
+        optim_RL, optim_state = self.optim
+        optim_RL.zero_grad()
+        optim_state.zero_grad()
+
         weight = batch.pop("weight", 1.0)
-        q = self(batch).logits
+        q = self(batch, self.train_collector.buffer, batch.indices).logits
         q = q[np.arange(len(q)), batch.act]
         returns = to_torch_as(batch.returns.flatten(), q)
         td_error = returns - q
@@ -183,7 +204,8 @@ class DQNPolicy(BasePolicy):
 
         batch.weight = td_error  # prio-buffer
         loss.backward()
-        self.optim.step()
+        optim_RL.step()
+        optim_state.step()
         self._iter += 1
         return {"loss": loss.item()}
 

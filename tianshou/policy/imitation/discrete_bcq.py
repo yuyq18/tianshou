@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from tianshou.data import Batch, ReplayBuffer, to_torch
 from tianshou.policy import DQNPolicy
+from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class DiscreteBCQPolicy(DQNPolicy):
@@ -48,11 +49,13 @@ class DiscreteBCQPolicy(DQNPolicy):
         unlikely_action_threshold: float = 0.3,
         imitation_logits_penalty: float = 1e-2,
         reward_normalization: bool = False,
+        state_tracker = None,
+        buffer: Optional[ReplayBuffer] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
             model, optim, discount_factor, estimation_step, target_update_freq,
-            reward_normalization, **kwargs
+            reward_normalization, state_tracker, **kwargs
         )
         assert target_update_freq > 0, "BCQ needs target network setting."
         self.imitator = imitator
@@ -65,6 +68,7 @@ class DiscreteBCQPolicy(DQNPolicy):
         assert 0.0 <= eval_eps < 1.0
         self.eps = eval_eps
         self._weight_reg = imitation_logits_penalty
+        self.buffer = buffer
 
     def train(self, mode: bool = True) -> "DiscreteBCQPolicy":
         self.training = mode
@@ -75,28 +79,42 @@ class DiscreteBCQPolicy(DQNPolicy):
     def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
         batch = buffer[indices]  # batch.obs_next: s_{t+n}
         # target_Q = Q_old(s_, argmax(Q_new(s_, *)))
-        act = self(batch, input="obs_next").act
-        target_q, _ = self.model_old(batch.obs_next)
+        act = self(batch, buffer, indices=indices, input="obs_next").act
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=batch["obs_next"], is_obs=False)  # is_train is True by default
+        target_q, _ = self.model_old(obs_emb)
+
         target_q = target_q[np.arange(len(act)), act]
         return target_q
 
     def forward(  # type: ignore
         self,
         batch: Batch,
+        buffer: ReplayBuffer,
+        indices: np.ndarray = None,
+        remove_recommended_ids=False,
+        is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         input: str = "obs",
         **kwargs: Any,
     ) -> Batch:
         obs = batch[input]
-        q_value, state = self.model(obs, state=state, info=batch.info)
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=obs, is_obs=(input=="obs"), is_train=is_train)
+        q_value, state = self.model(obs_emb, state=state, info=batch.info)
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q_value.shape[1]
-        imitation_logits, _ = self.imitator(obs, state=state, info=batch.info)
+        imitation_logits, _ = self.imitator(obs_emb, state=state, info=batch.info)
 
         # mask actions for argmax
         ratio = imitation_logits - imitation_logits.max(dim=-1, keepdim=True).values
         mask = (ratio < self._log_tau).float()
-        act = (q_value - np.inf * mask).argmax(dim=-1)
+
+        final_logits = q_value - np.inf * mask
+        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
+        logits_masked, indices_masked = removed_recommended_id_from_embedding(final_logits, recommended_ids)
+
+        act_masked = logits_masked.argmax(dim=-1)
+        act_unsqueezed = act_masked.unsqueeze(-1)
+        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
 
         return Batch(
             act=act, state=state, q_value=q_value, imitation_logits=imitation_logits
@@ -108,7 +126,7 @@ class DiscreteBCQPolicy(DQNPolicy):
         self._iter += 1
 
         target_q = batch.returns.flatten()
-        result = self(batch)
+        result = self(batch, self.buffer, batch.indices)
         imitation_logits = result.imitation_logits
         current_q = result.q_value[np.arange(len(target_q)), batch.act]
         act = to_torch(batch.act, dtype=torch.long, device=target_q.device)
@@ -117,9 +135,12 @@ class DiscreteBCQPolicy(DQNPolicy):
         reg_loss = imitation_logits.pow(2).mean()
         loss = q_loss + i_loss + self._weight_reg * reg_loss
 
-        self.optim.zero_grad()
+        optim_RL, optim_state = self.optim
+        optim_RL.zero_grad()
+        optim_state.zero_grad()
         loss.backward()
-        self.optim.step()
+        optim_RL.step()
+        optim_state.step()
 
         return {
             "loss": loss.item(),

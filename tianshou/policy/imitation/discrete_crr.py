@@ -1,12 +1,13 @@
 from copy import deepcopy
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from tianshou.data import Batch, to_torch, to_torch_as
+from tianshou.data import Batch, to_torch, to_torch_as, ReplayBuffer
 from tianshou.policy.modelfree.pg import PGPolicy
+from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class DiscreteCRRPolicy(PGPolicy):
@@ -49,6 +50,8 @@ class DiscreteCRRPolicy(PGPolicy):
         min_q_weight: float = 10.0,
         target_update_freq: int = 0,
         reward_normalization: bool = False,
+        state_tracker = None,
+        buffer: Optional[ReplayBuffer] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -57,6 +60,7 @@ class DiscreteCRRPolicy(PGPolicy):
             lambda x: Categorical(logits=x),  # type: ignore
             discount_factor,
             reward_normalization,
+            state_tracker,
             **kwargs,
         )
         self.critic = critic
@@ -76,6 +80,7 @@ class DiscreteCRRPolicy(PGPolicy):
         self._ratio_upper_bound = ratio_upper_bound
         self._beta = beta
         self._min_q_weight = min_q_weight
+        self.buffer = buffer
 
     def sync_weight(self) -> None:
         self.actor_old.load_state_dict(self.actor.state_dict())
@@ -84,22 +89,28 @@ class DiscreteCRRPolicy(PGPolicy):
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:  # type: ignore
         if self._target and self._iter % self._freq == 0:
             self.sync_weight()
-        self.optim.zero_grad()
-        q_t = self.critic(batch.obs)
+        optim_RL, optim_state = self.optim
+        optim_RL.zero_grad()
+        optim_state.zero_grad()
+
+        obs_emb = self.state_tracker(buffer=self.buffer, indices=batch.indices, is_obs=True)
+        obs_next_emb = self.state_tracker(buffer=self.buffer, indices=batch.indices, is_obs=False)
+
+        q_t = self.critic(obs_emb)
         act = to_torch(batch.act, dtype=torch.long, device=q_t.device)
         qa_t = q_t.gather(1, act.unsqueeze(1))
         # Critic loss
         with torch.no_grad():
-            target_a_t, _ = self.actor_old(batch.obs_next)
+            target_a_t, _ = self.actor_old(obs_next_emb)
             target_m = Categorical(logits=target_a_t)
-            q_t_target = self.critic_old(batch.obs_next)
+            q_t_target = self.critic_old(obs_next_emb)
             rew = to_torch_as(batch.rew, q_t_target)
             expected_target_q = (q_t_target * target_m.probs).sum(-1, keepdim=True)
             expected_target_q[batch.done > 0] = 0.0
             target = rew.unsqueeze(1) + self._gamma * expected_target_q
         critic_loss = 0.5 * F.mse_loss(qa_t, target)
         # Actor loss
-        act_target, _ = self.actor(batch.obs)
+        act_target, _ = self.actor(obs_emb)
         dist = Categorical(logits=act_target)
         expected_policy_q = (q_t * dist.probs).sum(-1, keepdim=True)
         advantage = qa_t - expected_policy_q
@@ -116,7 +127,9 @@ class DiscreteCRRPolicy(PGPolicy):
         min_q_loss = (q_t.logsumexp(1) - qa_t).mean()
         loss = actor_loss + critic_loss + self._min_q_weight * min_q_loss
         loss.backward()
-        self.optim.step()
+        optim_RL.step()
+        optim_state.step()
+
         self._iter += 1
         return {
             "loss": loss.item(),

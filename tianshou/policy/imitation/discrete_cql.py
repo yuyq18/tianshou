@@ -1,10 +1,10 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from tianshou.data import Batch, to_torch
+from tianshou.data import Batch, to_torch, ReplayBuffer
 from tianshou.policy import QRDQNPolicy
 
 
@@ -40,21 +40,27 @@ class DiscreteCQLPolicy(QRDQNPolicy):
         estimation_step: int = 1,
         target_update_freq: int = 0,
         reward_normalization: bool = False,
+        state_tracker = None,
+        buffer: Optional[ReplayBuffer] = None,
         min_q_weight: float = 10.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(
             model, optim, discount_factor, num_quantiles, estimation_step,
-            target_update_freq, reward_normalization, **kwargs
+            target_update_freq, reward_normalization, state_tracker, **kwargs
         )
         self._min_q_weight = min_q_weight
+        self.buffer = buffer
 
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
         if self._target and self._iter % self._freq == 0:
             self.sync_weight()
-        self.optim.zero_grad()
+        optim_RL, optim_state = self.optim
+        optim_RL.zero_grad()
+        optim_state.zero_grad()
+
         weight = batch.pop("weight", 1.0)
-        all_dist = self(batch).logits
+        all_dist = self(batch, self.buffer, indices=batch.indices).logits
         act = to_torch(batch.act, dtype=torch.long, device=all_dist.device)
         curr_dist = all_dist[np.arange(len(act)), act, :].unsqueeze(2)
         target_dist = batch.returns.unsqueeze(1)
@@ -75,7 +81,9 @@ class DiscreteCQLPolicy(QRDQNPolicy):
         min_q_loss = negative_sampling - dataset_expec
         loss = qr_loss + min_q_loss * self._min_q_weight
         loss.backward()
-        self.optim.step()
+        optim_RL.step()
+        optim_state.step()
+
         self._iter += 1
         return {
             "loss": loss.item(),

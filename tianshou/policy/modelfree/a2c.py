@@ -56,6 +56,7 @@ class A2CPolicy(PGPolicy):
         critic: torch.nn.Module,
         optim: torch.optim.Optimizer,
         dist_fn: Type[torch.distributions.Distribution],
+        state_tracker = None,
         vf_coef: float = 0.5,
         ent_coef: float = 0.01,
         max_grad_norm: Optional[float] = None,
@@ -63,7 +64,7 @@ class A2CPolicy(PGPolicy):
         max_batchsize: int = 256,
         **kwargs: Any
     ) -> None:
-        super().__init__(actor, optim, dist_fn, **kwargs)
+        super().__init__(actor, optim, dist_fn, state_tracker=state_tracker, **kwargs)
         self.critic = critic
         assert 0.0 <= gae_lambda <= 1.0, "GAE lambda should be in [0, 1]."
         self._lambda = gae_lambda
@@ -76,6 +77,7 @@ class A2CPolicy(PGPolicy):
     def process_fn(
         self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray
     ) -> Batch:
+        batch.indices = indices
         batch = self._compute_returns(batch, buffer, indices)
         batch.act = to_torch_as(batch.act, batch.v_s)
         return batch
@@ -86,8 +88,10 @@ class A2CPolicy(PGPolicy):
         v_s, v_s_ = [], []
         with torch.no_grad():
             for minibatch in batch.split(self._batch, shuffle=False, merge_last=True):
-                v_s.append(self.critic(minibatch.obs))
-                v_s_.append(self.critic(minibatch.obs_next))
+                obs_emb = self.state_tracker(buffer=buffer, indices=minibatch.indices, is_obs=True)
+                v_s.append(self.critic(obs_emb))
+                obs_next_emb = self.state_tracker(buffer=buffer, indices=minibatch.indices, is_obs=False)
+                v_s_.append(self.critic(obs_next_emb))
         batch.v_s = torch.cat(v_s, dim=0).flatten()  # old value
         v_s = batch.v_s.cpu().numpy()
         v_s_ = torch.cat(v_s_, dim=0).flatten().cpu().numpy()
@@ -121,27 +125,32 @@ class A2CPolicy(PGPolicy):
         self, batch: Batch, batch_size: int, repeat: int, **kwargs: Any
     ) -> Dict[str, List[float]]:
         losses, actor_losses, vf_losses, ent_losses = [], [], [], []
+        optim_RL, optim_state = self.optim
         for _ in range(repeat):
             for minibatch in batch.split(batch_size, merge_last=True):
                 # calculate loss for actor
-                dist = self(minibatch).dist
+                dist = self(minibatch, self.train_collector.buffer, indices=minibatch.indices, is_obs=True).dist
                 log_prob = dist.log_prob(minibatch.act)
                 log_prob = log_prob.reshape(len(minibatch.adv), -1).transpose(0, 1)
                 actor_loss = -(log_prob * minibatch.adv).mean()
                 # calculate loss for critic
-                value = self.critic(minibatch.obs).flatten()
+                obs_emb = self.state_tracker(self.train_collector.buffer, minibatch.indices, is_obs=True)
+                value = self.critic(obs_emb).flatten()
                 vf_loss = F.mse_loss(minibatch.returns, value)
                 # calculate regularization and overall loss
                 ent_loss = dist.entropy().mean()
                 loss = actor_loss + self._weight_vf * vf_loss \
                     - self._weight_ent * ent_loss
-                self.optim.zero_grad()
+                optim_RL.zero_grad()
+                optim_state.zero_grad()
                 loss.backward()
                 if self._grad_norm:  # clip large gradient
                     nn.utils.clip_grad_norm_(
                         self._actor_critic.parameters(), max_norm=self._grad_norm
                     )
-                self.optim.step()
+                optim_RL.step()
+                optim_state.step()
+
                 actor_losses.append(actor_loss.item())
                 vf_losses.append(vf_loss.item())
                 ent_losses.append(ent_loss.item())

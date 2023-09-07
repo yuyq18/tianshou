@@ -6,6 +6,7 @@ import torch
 from tianshou.data import Batch, ReplayBuffer, to_torch, to_torch_as
 from tianshou.policy import BasePolicy
 from tianshou.utils import RunningMeanStd
+from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class PGPolicy(BasePolicy):
@@ -42,6 +43,7 @@ class PGPolicy(BasePolicy):
         dist_fn: Type[torch.distributions.Distribution],
         discount_factor: float = 0.99,
         reward_normalization: bool = False,
+        state_tracker = None,
         action_scaling: bool = True,
         action_bound_method: str = "clip",
         deterministic_eval: bool = False,
@@ -73,6 +75,14 @@ class PGPolicy(BasePolicy):
         self.ret_rms = RunningMeanStd()
         self._eps = 1e-8
         self._deterministic_eval = deterministic_eval
+        self.state_tracker = state_tracker
+    
+    def set_collector(self, train_collector):
+        self.train_collector = train_collector
+
+    def set_eps(self, eps: float) -> None:
+        """Set the eps for epsilon-greedy exploration."""
+        self.eps = eps
 
     def process_fn(
         self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray
@@ -85,6 +95,7 @@ class PGPolicy(BasePolicy):
         where :math:`T` is the terminal time step, :math:`\gamma` is the
         discount factor, :math:`\gamma \in [0, 1]`.
         """
+        batch.indices = indices
         v_s_ = np.full(indices.shape, self.ret_rms.mean)
         unnormalized_returns, _ = self.compute_episodic_return(
             batch, buffer, indices, v_s_=v_s_, gamma=self._gamma, gae_lambda=1.0
@@ -100,6 +111,11 @@ class PGPolicy(BasePolicy):
     def forward(
         self,
         batch: Batch,
+        buffer: Optional[ReplayBuffer],
+        indices: np.ndarray = None,
+        is_obs = None,
+        remove_recommended_ids = False,
+        is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         **kwargs: Any,
     ) -> Batch:
@@ -117,35 +133,61 @@ class PGPolicy(BasePolicy):
             Please refer to :meth:`~tianshou.policy.BasePolicy.forward` for
             more detailed explanation.
         """
-        logits, hidden = self.actor(batch.obs, state=state, info=batch.info)
-        if isinstance(logits, tuple):
-            dist = self.dist_fn(*logits)
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=batch.obs, is_obs=is_obs, is_train=is_train)
+        logits, hidden = self.actor(obs_emb, state=state, info=batch.info)
+
+        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
+        logits_masked, indices_masked = removed_recommended_id_from_embedding(logits, recommended_ids)
+
+        if isinstance(logits_masked, tuple):
+            dist = self.dist_fn(*logits_masked)
         else:
-            dist = self.dist_fn(logits)
+            dist = self.dist_fn(logits_masked)
         if self._deterministic_eval and not self.training:
             if self.action_type == "discrete":
-                act = logits.argmax(-1)
+                act_masked = logits_masked.argmax(-1)
             elif self.action_type == "continuous":
-                act = logits[0]
+                act_masked = logits_masked[0]
         else:
-            act = dist.sample()
+            act_masked = dist.sample()
+        
+        act_unsqueezed = act_masked.unsqueeze(-1)
+        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
         return Batch(logits=logits, act=act, state=hidden, dist=dist)
 
     def learn(  # type: ignore
         self, batch: Batch, batch_size: int, repeat: int, **kwargs: Any
     ) -> Dict[str, List[float]]:
         losses = []
+        optim_RL, optim_state = self.optim
         for _ in range(repeat):
             for minibatch in batch.split(batch_size, merge_last=True):
-                self.optim.zero_grad()
-                result = self(minibatch)
+                optim_RL.zero_grad()
+                optim_state.zero_grad()
+                result = self(minibatch, self.train_collector.buffer, minibatch.indices, is_obs=True) # TODO is_obs=True/False
                 dist = result.dist
                 act = to_torch_as(minibatch.act, result.act)
                 ret = to_torch(minibatch.returns, torch.float, result.act.device)
                 log_prob = dist.log_prob(act).reshape(len(ret), -1).transpose(0, 1)
                 loss = -(log_prob * ret).mean()
                 loss.backward()
-                self.optim.step()
+                optim_RL.step()
+                optim_state.step()
                 losses.append(loss.item())
 
         return {"loss": losses}
+
+    def exploration_noise(
+            self,
+            act: Union[np.ndarray, Batch],
+            batch: Batch,
+    ) -> Union[np.ndarray, Batch]:
+        if isinstance(act, np.ndarray) and not np.isclose(self.eps, 0.0):
+            bsz = len(act)
+            rand_mask = np.random.rand(bsz) < self.eps
+            q = np.random.rand(bsz, self.actor.output_dim)  # [0, 1]
+            if hasattr(batch.obs, "mask"):
+                q += batch.obs.mask
+            rand_act = q.argmax(axis=1)
+            act[rand_mask] = rand_act[rand_mask]
+        return act
