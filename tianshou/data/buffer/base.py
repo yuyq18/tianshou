@@ -29,11 +29,10 @@ class ReplayBuffer:
     """
 
     _reserved_keys = (
-        "obs", "act", "rew", "terminated", "truncated", "done", "obs_next", "info",
-        "policy"
+        "obs", "act", "rew", "terminated", "truncated", "done", "obs_next", "info", "policy", "is_start", "rew_prev",
     )
     _input_keys = (
-        "obs", "act", "rew", "terminated", "truncated", "obs_next", "info", "policy"
+        "obs", "act", "rew", "terminated", "truncated", "obs_next", "info", "policy", "is_start", "rew_prev",
     )
 
     def __init__(
@@ -382,6 +381,8 @@ class ReplayBuffer:
             "terminated": self.terminated[indices],
             "truncated": self.truncated[indices],
             "done": self.done[indices],
+            "is_start": self.is_start[indices],
+            "rew_prev": self.rew_prev[indices],
             "obs_next": obs_next,
             "info": self.get(indices, "info", Batch()),
             "policy": self.get(indices, "policy", Batch()),
