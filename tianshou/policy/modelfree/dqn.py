@@ -136,6 +136,7 @@ class DQNPolicy(BasePolicy):
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         model: str = "model",
         input: str = "obs",
+        use_batch_in_statetracker=False,
         **kwargs: Any,
     ) -> Batch:
         """Compute action over the given batch data.
@@ -166,11 +167,12 @@ class DQNPolicy(BasePolicy):
             more detailed explanation.
         """
         model = getattr(self, model)
-        obs = batch[input]
-        obs_next = obs.obs if hasattr(obs, "obs") else obs
-        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=obs_next, is_obs=(input=="obs"), is_train=is_train)
+        # obs = batch[input]
+        # obs_next = obs.obs if hasattr(obs, "obs") else obs
+        is_obs = True if input == "obs" else False
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch,  is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         logits, hidden = model(obs_emb, state=state, info=batch.info)
-        q = self.compute_q_value(logits, getattr(obs, "mask", None))
+        q = self.compute_q_value(logits, getattr(obs_emb, "mask", None))
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q.shape[1]
 

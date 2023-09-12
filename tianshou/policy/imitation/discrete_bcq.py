@@ -80,7 +80,7 @@ class DiscreteBCQPolicy(DQNPolicy):
         batch = buffer[indices]  # batch.obs_next: s_{t+n}
         # target_Q = Q_old(s_, argmax(Q_new(s_, *)))
         act = self(batch, buffer, indices=indices, input="obs_next").act
-        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=batch["obs_next"], is_obs=False)  # is_train is True by default
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=False, batch=batch)  # is_train is True by default
         target_q, _ = self.model_old(obs_emb)
 
         target_q = target_q[np.arange(len(act)), act]
@@ -95,10 +95,12 @@ class DiscreteBCQPolicy(DQNPolicy):
         is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         input: str = "obs",
+        use_batch_in_statetracker=False,
         **kwargs: Any,
     ) -> Batch:
-        obs = batch[input]
-        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=obs, is_obs=(input=="obs"), is_train=is_train)
+        # obs = batch[input]
+        is_obs = True if input == "obs" else False
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch, is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         q_value, state = self.model(obs_emb, state=state, info=batch.info)
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q_value.shape[1]

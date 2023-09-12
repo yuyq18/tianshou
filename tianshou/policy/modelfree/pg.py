@@ -117,6 +117,7 @@ class PGPolicy(BasePolicy):
         remove_recommended_ids = False,
         is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
+        use_batch_in_statetracker = False,
         **kwargs: Any,
     ) -> Batch:
         """Compute action over the given batch data.
@@ -133,7 +134,7 @@ class PGPolicy(BasePolicy):
             Please refer to :meth:`~tianshou.policy.BasePolicy.forward` for
             more detailed explanation.
         """
-        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=batch.obs, is_obs=is_obs, is_train=is_train)
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch, is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         logits, hidden = self.actor(obs_emb, state=state, info=batch.info)
 
         recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None

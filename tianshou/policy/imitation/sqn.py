@@ -41,10 +41,12 @@ class SQNPolicy(DiscreteBCQPolicy):
         is_train = True,
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         input: str = "obs",
+        use_batch_in_statetracker=False,
         **kwargs: Any,
     ) -> Batch:
-        obs = batch[input]
-        obs_emb = self.state_tracker(buffer=buffer, indices=indices, obs=obs, is_obs=(input=="obs"), is_train=is_train)
+        # obs = batch[input]
+        is_obs = True if input == "obs" else False
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch,  is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         q_value, state = self.model(obs_emb, state=state, info=batch.info)
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q_value.shape[1]
