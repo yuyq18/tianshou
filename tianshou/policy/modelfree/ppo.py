@@ -89,22 +89,24 @@ class PPOPolicy(A2CPolicy):
         if self._recompute_adv:
             # buffer input `buffer` and `indices` to be used in `learn()`.
             self._buffer, self._indices = buffer, indices
+        batch.indices = indices
         batch = self._compute_returns(batch, buffer, indices)
         batch.act = to_torch_as(batch.act, batch.v_s)
         with torch.no_grad():
-            batch.logp_old = self(batch).dist.log_prob(batch.act)
+            batch.logp_old = self(batch, self.train_collector.buffer, indices=batch.indices, is_obs=True).dist.log_prob(batch.act)
         return batch
 
     def learn(  # type: ignore
         self, batch: Batch, batch_size: int, repeat: int, **kwargs: Any
     ) -> Dict[str, List[float]]:
         losses, clip_losses, vf_losses, ent_losses = [], [], [], []
+        optim_RL, optim_state = self.optim
         for step in range(repeat):
             if self._recompute_adv and step > 0:
                 batch = self._compute_returns(batch, self._buffer, self._indices)
             for minibatch in batch.split(batch_size, merge_last=True):
                 # calculate loss for actor
-                dist = self(minibatch).dist
+                dist = self(minibatch, self.train_collector.buffer, indices=minibatch.indices, is_obs=True).dist
                 if self._norm_adv:
                     mean, std = minibatch.adv.mean(), minibatch.adv.std()
                     minibatch.adv = (minibatch.adv -
@@ -123,7 +125,8 @@ class PPOPolicy(A2CPolicy):
                 else:
                     clip_loss = -torch.min(surr1, surr2).mean()
                 # calculate loss for critic
-                value = self.critic(minibatch.obs).flatten()
+                obs_emb = self.state_tracker(self.train_collector.buffer, minibatch.indices, is_obs=True)
+                value = self.critic(obs_emb).flatten()
                 if self._value_clip:
                     v_clip = minibatch.v_s + \
                         (value - minibatch.v_s).clamp(-self._eps_clip, self._eps_clip)
@@ -136,13 +139,16 @@ class PPOPolicy(A2CPolicy):
                 ent_loss = dist.entropy().mean()
                 loss = clip_loss + self._weight_vf * vf_loss \
                     - self._weight_ent * ent_loss
-                self.optim.zero_grad()
+                optim_RL.zero_grad()
+                optim_state.zero_grad()
                 loss.backward()
                 if self._grad_norm:  # clip large gradient
                     nn.utils.clip_grad_norm_(
                         self._actor_critic.parameters(), max_norm=self._grad_norm
                     )
-                self.optim.step()
+                optim_RL.step()
+                optim_state.step()
+
                 clip_losses.append(clip_loss.item())
                 vf_losses.append(vf_loss.item())
                 ent_losses.append(ent_loss.item())
