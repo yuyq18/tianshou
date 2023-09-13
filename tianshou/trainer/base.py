@@ -155,6 +155,7 @@ class BaseTrainer(ABC):
         show_progress: bool = True,
         test_in_train: bool = True,
         save_fn: Optional[Callable[[BasePolicy], None]] = None,
+        save_model_fn=None
     ):
         if save_fn:
             deprecation(
@@ -211,6 +212,8 @@ class BaseTrainer(ABC):
         self.best_epoch = self.start_epoch
         self.stop_fn_flag = False
         self.iter_num = 0
+
+        self.save_model_fn = save_model_fn
 
     def reset(self) -> None:
         """Initialize or reset the instance to yield a new iterator from zero."""
@@ -276,6 +279,11 @@ class BaseTrainer(ABC):
             progress = tqdm.tqdm
         else:
             progress = DummyTqdm
+
+        # add callbacks
+        callbacks = self.policy.callbacks
+        for callback in callbacks:
+            callback.on_epoch_begin(self.epoch)
 
         # perform n step_per_epoch
         with progress(
@@ -345,6 +353,12 @@ class BaseTrainer(ABC):
             self.policy, self.test_collector, self.test_fn, self.epoch,
             self.episode_per_test, self.logger, self.env_step, self.reward_metric
         )
+
+        # add callback
+        for callback in self.policy.callbacks:
+            callback.on_epoch_end(self.epoch, test_result)
+        self.save_model_fn(epoch=self.epoch, policy=self.policy)
+
         rew, rew_std = test_result["rew"], test_result["rew_std"]
         if self.best_epoch < 0 or self.best_reward < rew:
             self.best_epoch = self.epoch
@@ -357,7 +371,7 @@ class BaseTrainer(ABC):
                 f"Epoch #{self.epoch}: test_reward: {rew:.6f} ± {rew_std:.6f},"
                 f" best_reward: {self.best_reward:.6f} ± "
                 f"{self.best_reward_std:.6f} in #{self.best_epoch}",
-                flush=True
+                # flush=True
             )
         if not self.is_run:
             test_stat = {
@@ -438,11 +452,22 @@ class BaseTrainer(ABC):
         """
         try:
             self.is_run = True
+
+            # add callbacks
+            callbacks = self.policy.callbacks
+            for callback in callbacks:
+                callback.on_train_begin()
+
             deque(self, maxlen=0)  # feed the entire iterator into a zero-length deque
+
+            for callback in callbacks:
+                callback.on_train_end()
+
             info = gather_info(
                 self.start_time, self.train_collector, self.test_collector,
                 self.best_reward, self.best_reward_std
             )
+
         finally:
             self.is_run = False
 
