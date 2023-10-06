@@ -45,11 +45,12 @@ class C51Policy(DQNPolicy):
         estimation_step: int = 1,
         target_update_freq: int = 0,
         reward_normalization: bool = False,
+        state_tracker = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
             model, optim, discount_factor, estimation_step, target_update_freq,
-            reward_normalization, **kwargs
+            reward_normalization, state_tracker, **kwargs
         )
         assert num_atoms > 1, "num_atoms should be greater than 1"
         assert v_min < v_max, "v_max should be larger than v_min"
@@ -70,12 +71,12 @@ class C51Policy(DQNPolicy):
     ) -> torch.Tensor:
         return super().compute_q_value((logits * self.support).sum(2), mask)
 
-    def _target_dist(self, batch: Batch) -> torch.Tensor:
+    def _target_dist(self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
         if self._target:
-            act = self(batch, input="obs_next").act
-            next_dist = self(batch, model="model_old", input="obs_next").logits
+            act = self(batch, buffer, indices, input="obs_next").act
+            next_dist = self(batch, buffer, indices, model="model_old", input="obs_next").logits
         else:
-            next_batch = self(batch, input="obs_next")
+            next_batch = self(batch, buffer, indices, input="obs_next")
             act = next_batch.act
             next_dist = next_batch.logits
         next_dist = next_dist[np.arange(len(act)), act, :]
@@ -91,11 +92,13 @@ class C51Policy(DQNPolicy):
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
         if self._target and self._iter % self._freq == 0:
             self.sync_weight()
-        self.optim.zero_grad()
+        optim_RL, optim_state = self.optim
+        optim_RL.zero_grad()
+        optim_state.zero_grad()
         with torch.no_grad():
-            target_dist = self._target_dist(batch)
+            target_dist = self._target_dist(batch, self.train_collector.buffer, indices=batch.indices)
         weight = batch.pop("weight", 1.0)
-        curr_dist = self(batch).logits
+        curr_dist = self(batch, self.train_collector.buffer, indices=batch.indices).logits
         act = batch.act
         curr_dist = curr_dist[np.arange(len(act)), act, :]
         cross_entropy = -(target_dist * torch.log(curr_dist + 1e-8)).sum(1)
@@ -103,6 +106,7 @@ class C51Policy(DQNPolicy):
         # ref: https://github.com/Kaixhin/Rainbow/blob/master/agent.py L94-100
         batch.weight = cross_entropy.detach()  # prio-buffer
         loss.backward()
-        self.optim.step()
+        optim_RL.step()
+        optim_state.step()
         self._iter += 1
         return {"loss": loss.item()}
