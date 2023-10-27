@@ -77,7 +77,6 @@ class A2CPolicy(PGPolicy):
     def process_fn(
         self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray
     ) -> Batch:
-        batch.indices = indices
         batch = self._compute_returns(batch, buffer, indices)
         batch.act = to_torch_as(batch.act, batch.v_s)
         return batch
@@ -129,12 +128,12 @@ class A2CPolicy(PGPolicy):
         for _ in range(repeat):
             for minibatch in batch.split(batch_size, merge_last=True):
                 # calculate loss for actor
-                dist = self(minibatch, self.train_collector.buffer, indices=minibatch.indices, is_obs=True).dist
+                dist = self(minibatch, self._buffer, indices=minibatch.indices, is_obs=True).dist
                 log_prob = dist.log_prob(minibatch.act)
                 log_prob = log_prob.reshape(len(minibatch.adv), -1).transpose(0, 1)
                 actor_loss = -(log_prob * minibatch.adv).mean()
                 # calculate loss for critic
-                obs_emb = self.state_tracker(self.train_collector.buffer, minibatch.indices, is_obs=True)
+                obs_emb = self.state_tracker(self._buffer, minibatch.indices, is_obs=True)
                 value = self.critic(obs_emb).flatten()
                 vf_loss = F.mse_loss(minibatch.returns, value)
                 # calculate regularization and overall loss

@@ -6,7 +6,6 @@ import torch
 
 from tianshou.data import Batch, ReplayBuffer, to_numpy, to_torch_as
 from tianshou.policy import BasePolicy
-from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class DQNPolicy(BasePolicy):
@@ -74,9 +73,6 @@ class DQNPolicy(BasePolicy):
     def set_eps(self, eps: float) -> None:
         """Set the eps for epsilon-greedy exploration."""
         self.eps = eps
-    
-    def set_collector(self, train_collector):
-        self.train_collector = train_collector
 
     def train(self, mode: bool = True) -> "DQNPolicy":
         """Set the module in training mode, except for the target network."""
@@ -88,8 +84,8 @@ class DQNPolicy(BasePolicy):
         """Synchronize the weight for the target network."""
         self.model_old.load_state_dict(self.model.state_dict())
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
-        batch = buffer[indices]  # batch.obs_next: s_{t+n}
+    def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+        # batch = buffer[indices]  # batch.obs_next: s_{t+n}
         result = self(batch, buffer, indices, input="obs_next")
         if self._target:
             # target_Q = Q_old(s_, argmax(Q_new(s_, *)))
@@ -109,7 +105,6 @@ class DQNPolicy(BasePolicy):
         More details can be found at
         :meth:`~tianshou.policy.BasePolicy.compute_nstep_return`.
         """
-        batch.indices = indices  # update
         batch = self.compute_nstep_return(
             batch, buffer, indices, self._target_q, self._gamma, self._n_step,
             self._rew_norm
@@ -131,7 +126,6 @@ class DQNPolicy(BasePolicy):
         batch: Batch,
         buffer: Optional[ReplayBuffer],
         indices: np.ndarray = None,
-        remove_recommended_ids = False,
         is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         model: str = "model",
@@ -176,11 +170,7 @@ class DQNPolicy(BasePolicy):
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q.shape[1]
 
-        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
-        logits_masked, indices_masked = removed_recommended_id_from_embedding(q, recommended_ids)
-        act_masked = logits_masked.max(dim=1)[1]
-        act_unsqueezed = act_masked.unsqueeze(-1)
-        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
+        act = to_numpy((q * batch.mask).max(dim=1)[1])
 
         return Batch(logits=logits, act=act, state=hidden)
 
@@ -192,7 +182,7 @@ class DQNPolicy(BasePolicy):
         optim_state.zero_grad()
 
         weight = batch.pop("weight", 1.0)
-        q = self(batch, self.train_collector.buffer, batch.indices).logits
+        q = self(batch, self._buffer, batch.indices).logits
         q = q[np.arange(len(q)), batch.act]
         returns = to_torch_as(batch.returns.flatten(), q)
         td_error = returns - q

@@ -47,10 +47,12 @@ class DDPGPolicy(BasePolicy):
         actor_optim: Optional[torch.optim.Optimizer],
         critic: Optional[torch.nn.Module],
         critic_optim: Optional[torch.optim.Optimizer],
+        optim_state: Optional[torch.optim.Optimizer],
         tau: float = 0.005,
         gamma: float = 0.99,
         exploration_noise: Optional[BaseNoise] = GaussianNoise(sigma=0.1),
         reward_normalization: bool = False,
+        state_tracker = None,
         estimation_step: int = 1,
         action_scaling: bool = True,
         action_bound_method: str = "clip",
@@ -96,6 +98,8 @@ class DDPGPolicy(BasePolicy):
         # self.noise = OUNoise()
         self._rew_norm = reward_normalization
         self._n_step = estimation_step
+        self.optim_state = optim_state
+        self.state_tracker = state_tracker
 
     def set_exp_noise(self, noise: Optional[BaseNoise]) -> None:
         """Set the exploration noise."""
@@ -113,11 +117,12 @@ class DDPGPolicy(BasePolicy):
         self.soft_update(self.actor_old, self.actor, self.tau)
         self.soft_update(self.critic_old, self.critic, self.tau)
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
-        batch = buffer[indices]  # batch.obs_next: s_{t+n}
+    def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+        # batch = buffer[indices]  # batch.obs_next: s_{t+n}
+        obs_next_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=False)
         target_q = self.critic_old(
-            batch.obs_next,
-            self(batch, model='actor_old', input='obs_next').act
+            obs_next_emb,
+            self(batch, buffer, indices, model='actor_old', input='obs_next').act
         )
         return target_q
 
@@ -133,9 +138,13 @@ class DDPGPolicy(BasePolicy):
     def forward(
         self,
         batch: Batch,
+        buffer: Optional[ReplayBuffer],
+        indices: np.ndarray = None,
+        is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         model: str = "actor",
         input: str = "obs",
+        use_batch_in_statetracker = False,
         **kwargs: Any,
     ) -> Batch:
         """Compute action over the given batch data.
@@ -151,17 +160,20 @@ class DDPGPolicy(BasePolicy):
             more detailed explanation.
         """
         model = getattr(self, model)
-        obs = batch[input]
-        actions, hidden = model(obs, state=state, info=batch.info)
+        # obs = batch[input]
+        is_obs = True if input == "obs" else False
+        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch,  is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
+        actions, hidden = model(obs_emb, state=state, info=batch.info)
         return Batch(act=actions, state=hidden)
 
-    @staticmethod
+    # @staticmethod
     def _mse_optimizer(
-        batch: Batch, critic: torch.nn.Module, optimizer: torch.optim.Optimizer
+        self, batch: Batch, critic: torch.nn.Module, optimizer: torch.optim.Optimizer
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """A simple wrapper script for updating critic network."""
         weight = getattr(batch, "weight", 1.0)
-        current_q = critic(batch.obs, batch.act).flatten()
+        obs_emb = self.state_tracker(self._buffer, indices=batch.indices, is_obs=True)
+        current_q = critic(obs_emb, batch.act).flatten()
         target_q = batch.returns.flatten()
         td = current_q - target_q
         # critic_loss = F.mse_loss(current_q1, target_q)
@@ -172,14 +184,18 @@ class DDPGPolicy(BasePolicy):
         return td, critic_loss
 
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
+        self.optim_state.zero_grad()
         # critic
         td, critic_loss = self._mse_optimizer(batch, self.critic, self.critic_optim)
         batch.weight = td  # prio-buffer
         # actor
-        actor_loss = -self.critic(batch.obs, self(batch).act).mean()
+        obs_emb = self.state_tracker(self._buffer, indices=batch.indices, is_obs=True)
+        actor_loss = -self.critic(obs_emb, self(batch, self._buffer, batch.indices).act).mean()
         self.actor_optim.zero_grad()
         actor_loss.backward()
         self.actor_optim.step()
+
+        self.optim_state.step()
         self.sync_weight()
         return {
             "loss/actor": actor_loss.item(),

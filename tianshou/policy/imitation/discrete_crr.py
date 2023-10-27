@@ -7,7 +7,6 @@ from torch.distributions import Categorical
 
 from tianshou.data import Batch, to_torch, to_torch_as, ReplayBuffer
 from tianshou.policy.modelfree.pg import PGPolicy
-from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class DiscreteCRRPolicy(PGPolicy):

@@ -388,7 +388,7 @@ class BasePolicy(ABC, nn.Module):
         # and are truncated at the end of each episode
         terminal = indices[-1]
         with torch.no_grad():
-            target_q_torch = target_q_fn(buffer, terminal)  # (bsz, ?)
+            target_q_torch = target_q_fn(batch, buffer, terminal)  # (bsz, ?)
         target_q = to_numpy(target_q_torch.reshape(bsz, -1))
         target_q = target_q * BasePolicy.value_mask(buffer, terminal).reshape(-1, 1)
         end_flag = buffer.done.copy()

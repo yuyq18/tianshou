@@ -56,8 +56,8 @@ class QRDQNPolicy(DQNPolicy):
         )
         warnings.filterwarnings("ignore", message="Using a target size")
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
-        batch = buffer[indices]  # batch.obs_next: s_{t+n}
+    def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+        # batch = buffer[indices]  # batch.obs_next: s_{t+n}
         if self._target:
             act = self(batch, buffer, indices, input="obs_next").act
             next_dist = self(batch, buffer, indices, model="model_old", input="obs_next").logits
@@ -80,7 +80,7 @@ class QRDQNPolicy(DQNPolicy):
         optim_RL.zero_grad()
         optim_state.zero_grad()
         weight = batch.pop("weight", 1.0)
-        curr_dist = self(batch, self.train_collector.buffer, indices=batch.indices).logits
+        curr_dist = self(batch, self._buffer, indices=batch.indices).logits
         act = batch.act
         curr_dist = curr_dist[np.arange(len(act)), act, :].unsqueeze(2)
         target_dist = batch.returns.unsqueeze(1)

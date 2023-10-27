@@ -6,7 +6,6 @@ import torch
 from tianshou.data import Batch, ReplayBuffer, to_torch, to_torch_as
 from tianshou.policy import BasePolicy
 from tianshou.utils import RunningMeanStd
-from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class PGPolicy(BasePolicy):
@@ -76,9 +75,6 @@ class PGPolicy(BasePolicy):
         self._eps = 1e-8
         self._deterministic_eval = deterministic_eval
         self.state_tracker = state_tracker
-    
-    def set_collector(self, train_collector):
-        self.train_collector = train_collector
 
     def set_eps(self, eps: float) -> None:
         """Set the eps for epsilon-greedy exploration."""
@@ -95,7 +91,6 @@ class PGPolicy(BasePolicy):
         where :math:`T` is the terminal time step, :math:`\gamma` is the
         discount factor, :math:`\gamma \in [0, 1]`.
         """
-        batch.indices = indices
         v_s_ = np.full(indices.shape, self.ret_rms.mean)
         unnormalized_returns, _ = self.compute_episodic_return(
             batch, buffer, indices, v_s_=v_s_, gamma=self._gamma, gae_lambda=1.0
@@ -114,7 +109,6 @@ class PGPolicy(BasePolicy):
         buffer: Optional[ReplayBuffer],
         indices: np.ndarray = None,
         is_obs = None,
-        remove_recommended_ids = False,
         is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         use_batch_in_statetracker = False,
@@ -136,24 +130,20 @@ class PGPolicy(BasePolicy):
         """
         obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch, is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         logits, hidden = self.actor(obs_emb, state=state, info=batch.info)
+        if self.action_type == "discrete":
+            logits = logits * batch.mask
 
-        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
-        logits_masked, indices_masked = removed_recommended_id_from_embedding(logits, recommended_ids)
-
-        if isinstance(logits_masked, tuple):
-            dist = self.dist_fn(*logits_masked)
+        if isinstance(logits, tuple):
+            dist = self.dist_fn(*logits)
         else:
-            dist = self.dist_fn(logits_masked)
+            dist = self.dist_fn(logits)
         if self._deterministic_eval and not self.training:
             if self.action_type == "discrete":
-                act_masked = logits_masked.argmax(-1)
+                act = logits.argmax(-1)
             elif self.action_type == "continuous":
-                act_masked = logits_masked[0]
+                act = logits[0]
         else:
-            act_masked = dist.sample()
-        
-        act_unsqueezed = act_masked.unsqueeze(-1)
-        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
+            act = dist.sample()
         return Batch(logits=logits, act=act, state=hidden, dist=dist)
 
     def learn(  # type: ignore
@@ -165,7 +155,7 @@ class PGPolicy(BasePolicy):
             for minibatch in batch.split(batch_size, merge_last=True):
                 optim_RL.zero_grad()
                 optim_state.zero_grad()
-                result = self(minibatch, self.train_collector.buffer, minibatch.indices, is_obs=True) # TODO is_obs=True/False
+                result = self(minibatch, self._buffer, minibatch.indices, is_obs=True) # TODO is_obs=True/False
                 dist = result.dist
                 act = to_torch_as(minibatch.act, result.act)
                 ret = to_torch(minibatch.returns, torch.float, result.act.device)

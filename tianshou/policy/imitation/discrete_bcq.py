@@ -7,7 +7,6 @@ import torch.nn.functional as F
 
 from tianshou.data import Batch, ReplayBuffer, to_torch
 from tianshou.policy import DQNPolicy
-from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 
 class DiscreteBCQPolicy(DQNPolicy):
@@ -76,8 +75,8 @@ class DiscreteBCQPolicy(DQNPolicy):
         self.imitator.train(mode)
         return self
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
-        batch = buffer[indices]  # batch.obs_next: s_{t+n}
+    def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+        # batch = buffer[indices]  # batch.obs_next: s_{t+n}
         # target_Q = Q_old(s_, argmax(Q_new(s_, *)))
         act = self(batch, buffer, indices=indices, input="obs_next").act
         obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=False, batch=batch)  # is_train is True by default
@@ -91,7 +90,6 @@ class DiscreteBCQPolicy(DQNPolicy):
         batch: Batch,
         buffer: ReplayBuffer,
         indices: np.ndarray = None,
-        remove_recommended_ids=False,
         is_train = True, 
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         input: str = "obs",
@@ -110,13 +108,7 @@ class DiscreteBCQPolicy(DQNPolicy):
         ratio = imitation_logits - imitation_logits.max(dim=-1, keepdim=True).values
         mask = (ratio < self._log_tau).float()
 
-        final_logits = q_value - np.inf * mask
-        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
-        logits_masked, indices_masked = removed_recommended_id_from_embedding(final_logits, recommended_ids)
-
-        act_masked = logits_masked.argmax(dim=-1)
-        act_unsqueezed = act_masked.unsqueeze(-1)
-        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
+        act = ((q_value - np.inf * mask) * batch.mask).argmax(dim=-1)
 
         return Batch(
             act=act, state=state, q_value=q_value, imitation_logits=imitation_logits

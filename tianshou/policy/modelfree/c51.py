@@ -63,7 +63,7 @@ class C51Policy(DQNPolicy):
         )
         self.delta_z = (v_max - v_min) / (num_atoms - 1)
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+    def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
         return self.support.repeat(len(indices), 1)  # shape: [bsz, num_atoms]
 
     def compute_q_value(
@@ -96,9 +96,9 @@ class C51Policy(DQNPolicy):
         optim_RL.zero_grad()
         optim_state.zero_grad()
         with torch.no_grad():
-            target_dist = self._target_dist(batch, self.train_collector.buffer, indices=batch.indices)
+            target_dist = self._target_dist(batch, self._buffer, indices=batch.indices)
         weight = batch.pop("weight", 1.0)
-        curr_dist = self(batch, self.train_collector.buffer, indices=batch.indices).logits
+        curr_dist = self(batch, self._buffer, indices=batch.indices).logits
         act = batch.act
         curr_dist = curr_dist[np.arange(len(act)), act, :]
         cross_entropy = -(target_dist * torch.log(curr_dist + 1e-8)).sum(1)

@@ -5,7 +5,7 @@ import torch
 
 from tianshou.data import Batch, ReplayBuffer
 from tianshou.policy import DiscreteBCQPolicy
-from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
+# from tianshou.utils.rec_mask import get_recommended_ids, removed_recommended_id_from_embedding
 
 class SQNPolicy(DiscreteBCQPolicy):
     def __init__(
@@ -37,7 +37,6 @@ class SQNPolicy(DiscreteBCQPolicy):
         batch: Batch,
         buffer: ReplayBuffer,
         indices: np.ndarray = None,
-        remove_recommended_ids=False,
         is_train = True,
         state: Optional[Union[dict, Batch, np.ndarray]] = None,
         input: str = "obs",
@@ -52,23 +51,19 @@ class SQNPolicy(DiscreteBCQPolicy):
             self.max_action_num = q_value.shape[1]
         imitation_logits, _ = self.imitator(obs_emb, state=state, info=batch.info)
 
-        recommended_ids = get_recommended_ids(buffer) if remove_recommended_ids else None
-        q_value_masked, indices_masked = removed_recommended_id_from_embedding(q_value, recommended_ids)
-        imitation_logits_masked, indices_masked = removed_recommended_id_from_embedding(imitation_logits, recommended_ids)
+        q_value = q_value * batch.mask
+        imitation_logits = imitation_logits * batch.mask
 
         if self.which_head == "bcq":
             # BCQ way
-            ratio = imitation_logits_masked - imitation_logits_masked.max(dim=-1, keepdim=True).values
+            ratio = imitation_logits - imitation_logits.max(dim=-1, keepdim=True).values
             mask = (ratio < self._log_tau).float()
-            act_masked = (q_value_masked - np.inf * mask).argmax(dim=-1)
+            act = (q_value - np.inf * mask).argmax(dim=-1)
         elif self.which_head == "shead":
             # Supervised head
-            act_masked = imitation_logits_masked.argmax(dim=-1)
+            act = imitation_logits.argmax(dim=-1)
         elif self.which_head == "qhead":
-            act_masked = q_value_masked.argmax(dim=-1)
-
-        act_unsqueezed = act_masked.unsqueeze(-1)
-        act = indices_masked.gather(dim=1, index=act_unsqueezed).squeeze(1)
+            act = q_value.argmax(dim=-1)
 
         return Batch(
             act=act, state=state, q_value=q_value, imitation_logits=imitation_logits

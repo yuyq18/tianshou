@@ -134,8 +134,8 @@ class SACPolicy(DDPGPolicy):
             log_prob=log_prob
         )
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
-        batch = buffer[indices]  # batch.obs: s_{t+n}
+    def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+        # batch = buffer[indices]  # batch.obs: s_{t+n}
         obs_next_result = self(batch, input="obs_next")
         act_ = obs_next_result.act
         target_q = torch.min(
