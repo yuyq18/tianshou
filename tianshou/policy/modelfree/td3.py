@@ -57,6 +57,7 @@ class TD3Policy(DDPGPolicy):
         critic1_optim: torch.optim.Optimizer,
         critic2: torch.nn.Module,
         critic2_optim: torch.optim.Optimizer,
+        optim_state: Optional[torch.optim.Optimizer],
         tau: float = 0.005,
         gamma: float = 0.99,
         exploration_noise: Optional[BaseNoise] = GaussianNoise(sigma=0.1),
@@ -64,12 +65,13 @@ class TD3Policy(DDPGPolicy):
         update_actor_freq: int = 2,
         noise_clip: float = 0.5,
         reward_normalization: bool = False,
+        state_tracker = None,
         estimation_step: int = 1,
         **kwargs: Any,
     ) -> None:
         super().__init__(
-            actor, actor_optim, None, None, tau, gamma, exploration_noise,
-            reward_normalization, estimation_step, **kwargs
+            actor, actor_optim, None, None, optim_state, tau, gamma, exploration_noise,
+            reward_normalization, state_tracker, estimation_step, **kwargs
         )
         self.critic1, self.critic1_old = critic1, deepcopy(critic1)
         self.critic1_old.eval()
@@ -97,18 +99,20 @@ class TD3Policy(DDPGPolicy):
 
     def _target_q(self, batch, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
         # batch = buffer[indices]  # batch.obs: s_{t+n}
-        act_ = self(batch, model="actor_old", input="obs_next").act
+        act_ = self(batch, buffer, indices, model='actor_old', input='obs_next').act
         noise = torch.randn(size=act_.shape, device=act_.device) * self._policy_noise
         if self._noise_clip > 0.0:
             noise = noise.clamp(-self._noise_clip, self._noise_clip)
         act_ += noise
+        obs_next_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=False)
         target_q = torch.min(
-            self.critic1_old(batch.obs_next, act_),
-            self.critic2_old(batch.obs_next, act_),
+            self.critic1_old(obs_next_emb, act_),
+            self.critic2_old(obs_next_emb, act_),
         )
         return target_q
 
     def learn(self, batch: Batch, **kwargs: Any) -> Dict[str, float]:
+        self.optim_state.zero_grad()
         # critic 1&2
         td1, critic1_loss = self._mse_optimizer(
             batch, self.critic1, self.critic1_optim
@@ -120,11 +124,13 @@ class TD3Policy(DDPGPolicy):
 
         # actor
         if self._cnt % self._freq == 0:
-            actor_loss = -self.critic1(batch.obs, self(batch, eps=0.0).act).mean()
+            obs_emb = self.state_tracker(self._buffer, indices=batch.indices, is_obs=True)
+            actor_loss = -self.critic1(obs_emb, self(batch, self._buffer, batch.indices, eps=0.0).act).mean()
             self.actor_optim.zero_grad()
             actor_loss.backward()
             self._last = actor_loss.item()
             self.actor_optim.step()
+            self.optim_state.step()
             self.sync_weight()
         self._cnt += 1
         return {
