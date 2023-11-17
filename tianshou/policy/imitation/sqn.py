@@ -51,8 +51,12 @@ class SQNPolicy(DiscreteBCQPolicy):
             self.max_action_num = q_value.shape[1]
         imitation_logits, _ = self.imitator(obs_emb, state=state, info=batch.info)
 
-        q_value = q_value * batch.mask
-        imitation_logits = imitation_logits * batch.mask
+        if is_obs:
+            q_value = q_value * batch.mask
+            imitation_logits = imitation_logits * batch.mask
+        else:
+            q_value = q_value * batch.next_mask
+            imitation_logits = imitation_logits * batch.next_mask
 
         if self.which_head == "bcq":
             # BCQ way

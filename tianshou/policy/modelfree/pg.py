@@ -130,9 +130,13 @@ class PGPolicy(BasePolicy):
         """
         obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch, is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         logits, hidden = self.actor(obs_emb, state=state, info=batch.info)
-        if self.action_type == "discrete":
-            logits = logits * batch.mask
 
+        if self.action_type == "discrete":
+            if is_obs:
+                logits = logits * batch.mask  # logits is in [0, 1]  the final layer of actor is softmax_layer
+            else:
+                logits = logits * batch.next_mask 
+        
         if isinstance(logits, tuple):
             dist = self.dist_fn(*logits)
         else:

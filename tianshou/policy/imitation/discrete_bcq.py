@@ -79,8 +79,8 @@ class DiscreteBCQPolicy(DQNPolicy):
         # batch = buffer[indices]  # batch.obs_next: s_{t+n}
         # target_Q = Q_old(s_, argmax(Q_new(s_, *)))
         act = self(batch, buffer, indices=indices, input="obs_next").act
-        obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=False, batch=batch)  # is_train is True by default
-        target_q, _ = self.model_old(obs_emb)
+        obs_next_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=False, batch=batch)  # is_train is True by default
+        target_q, _ = self.model_old(obs_next_emb)
 
         target_q = target_q[np.arange(len(act)), act]
         return target_q
@@ -104,11 +104,19 @@ class DiscreteBCQPolicy(DQNPolicy):
             self.max_action_num = q_value.shape[1]
         imitation_logits, _ = self.imitator(obs_emb, state=state, info=batch.info)
 
+        if is_obs:
+            q_value = q_value * batch.mask
+            imitation_logits = imitation_logits * batch.mask
+        else:
+            q_value = q_value * batch.next_mask
+            imitation_logits = imitation_logits * batch.next_mask
+
         # mask actions for argmax
         ratio = imitation_logits - imitation_logits.max(dim=-1, keepdim=True).values
         mask = (ratio < self._log_tau).float()
 
-        act = ((q_value - np.inf * mask) * batch.mask).argmax(dim=-1)
+        # act = ((q_value - np.inf * mask) * batch.mask).argmax(dim=-1)
+        act = (q_value - np.inf * mask).argmax(dim=-1)
 
         return Batch(
             act=act, state=state, q_value=q_value, imitation_logits=imitation_logits

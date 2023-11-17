@@ -118,7 +118,7 @@ class DQNPolicy(BasePolicy):
         if mask is not None:
             # the masked q value should be smaller than logits.min()
             min_value = logits.min() - logits.max() - 1.0
-            logits = logits + to_torch_as(1 - mask, logits) * min_value
+            logits = logits + to_torch_as(~mask, logits) * min_value
         return logits
 
     def forward(
@@ -166,11 +166,16 @@ class DQNPolicy(BasePolicy):
         is_obs = True if input == "obs" else False
         obs_emb = self.state_tracker(buffer=buffer, indices=indices, is_obs=is_obs, batch=batch,  is_train=is_train, use_batch_in_statetracker=use_batch_in_statetracker)
         logits, hidden = model(obs_emb, state=state, info=batch.info)
-        q = self.compute_q_value(logits, getattr(obs_emb, "mask", None))
+
+        if is_obs:
+            q = self.compute_q_value(logits, getattr(batch, "mask", None))  # logits may be not in [0,1]
+        else:
+            q = self.compute_q_value(logits, getattr(batch, "next_mask", None))
+
         if not hasattr(self, "max_action_num"):
             self.max_action_num = q.shape[1]
 
-        act = to_numpy((q * batch.mask).max(dim=1)[1])
+        act = to_numpy((q).max(dim=1)[1])
 
         return Batch(logits=logits, act=act, state=hidden)
 
